@@ -5,7 +5,7 @@ Steer‑Bot: Goodfire ⚡ CodeAgent 🤖
 Interactive research assistant that lets you:
 • converse in NL to *steer* a Goodfire `Variant` (AutoSteer / search / manual `set` / conditional rules)
 • keep a live `Variant` object across turns so you can iteratively refine behaviour
-• preview generations (`chat_once`) and inspect / visualise feature‑weight diffs after every edit
+• preview generations (`test_once`) and inspect / visualise feature‑weight diffs after every edit
 • evaluate the current Variant on an arbitrary dataset and compare to the *base* model
 
 Run it locally:
@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from datasets import load_dataset as hf_load_dataset
+import json
 
 from goodfire import Client, Variant, Feature, FeatureEdits
 from smolagents import CodeAgent, LiteLLMModel, tool
@@ -65,8 +66,6 @@ def autosteer(spec: str) -> FeatureEdits:
 
     Returns:
         FeatureEdits: The steering vector proposed by Goodfire's AutoSteer.
-
-    Always store_to_memory the results of any tool call in the global memory using store_to_memory() and you can read_from_memory them later using read_from_memory().
     """
     return GF.features.AutoSteer(specification=spec, model=variant)
 
@@ -95,14 +94,12 @@ def search_features(query: str, k: int = 5) -> List[Feature]:
 
     Returns:
         List[Feature]: Top‑k matching features.
-
-    Always call store_to_memory() after calling this tool to store_to_memory the results for later use.
     """
     return GF.features.search(query, model=variant, top_k=k)
 
 
 @tool
-def chat_once(prompt: str) -> str:
+def test_once(prompt: str) -> str:
     """Generate a single reply from the *current* steered Variant.
 
     Args:
@@ -172,9 +169,6 @@ def evaluate_dataset(list_of_prompts: List[str], criteria: str = None) -> Dict[s
 
     Returns:
         dict: {"responses": List[str], "mean_score": float}
-
-    Always store the results of any tool call in the global memory using store_to_memory() and you can read_from_memory them later using read_from_memory().
-    You can also read_from_memory the entire memory using read_from_memory() without a key.
     """
     if not criteria or not isinstance(criteria, str) or not criteria.strip():
         print("[error] No evaluation criteria provided. Please specify a natural-language criteria for the LLM judge (e.g. 'The reply is calm / non-angry.').")
@@ -182,7 +176,7 @@ def evaluate_dataset(list_of_prompts: List[str], criteria: str = None) -> Dict[s
     
     for prompt in list_of_prompts:
         # 1│ generate
-        replies = [chat_once(str(p)) for p in list_of_prompts]
+        replies = [test_once(str(p)) for p in list_of_prompts]
 
     # 2│ judge
     scores = [
@@ -200,34 +194,64 @@ def evaluate_dataset(list_of_prompts: List[str], criteria: str = None) -> Dict[s
 
     return {"responses": replies, "mean_score": mean_score}
 
-# Simple key–value store_to_memory the agent can access every turn
-_GLOBAL_MEM: dict[str, Any] = {}
-
 @tool
-def store_to_memory(key: str, value: Any) -> str:
-    """Save *value* under *key* for later turns. ALWAYS store any tool call results in the global memory using store_to_memory() and you can read_from_memory them later using read_from_memory().
-    
+def set_when(condition: Any, edits: Any) -> str:
+    """Apply feature edits when a condition is met.
+
     Args:
-        key (str): The key to save the value under.
-        value (Any): The value to save.
+        condition (Any): A ConditionalGroup or comparison (e.g. feature > 0.7).
+        edits (Any): FeatureEdits or dict[Feature|str, float] to apply when the condition is met.
 
     Returns:
         str: Confirmation message.
     """
-    _GLOBAL_MEM[key] = value
-    return f"Saved under key '{key}'."
+    variant.set_when(condition, edits)
+    return "✅ Conditional intervention set."
 
 @tool
-def read_from_memory(key: str = None) -> Any:
-    """Retrieve an object previously stored with store_to_memory().
-    
+def abort_when(condition: Any) -> str:
+    """Abort generation when a condition is met by raising an InferenceAbortedException.
+
     Args:
-        key (str): The key to retrieve the value from. If no key is provided, you will get the entire memory.
+        condition (Any): A ConditionalGroup or comparison (e.g. feature > 0.7).
 
     Returns:
-        Any: The value stored under the key or the entire memory if no key is provided.
+        str: Confirmation message.
     """
-    return _GLOBAL_MEM[key] if key else _GLOBAL_MEM
+    variant.abort_when(condition)
+    return "✅ Abort condition set."
+
+@tool
+def export_variant(name: str = "variant.json") -> str:
+    """Export the current Variant as a JSON string.
+
+    Args:
+        name (str): The name of the variant file to export (inside variants/).
+
+    Returns:
+        str: Confirmation message.
+    """
+    os.makedirs("variants", exist_ok=True)
+    path = os.path.join("variants", name)
+    with open(path, "w") as f:
+        f.write(json.dumps(variant.json()))
+    return f"✅ Variant exported to {path}."
+
+@tool
+def load_variant_from_json(variant_json: str) -> str:
+    """Load a Variant from a JSON string and set it as the current Variant.
+
+    Args:
+        variant_json (str): JSON string representing a Variant.
+
+    Returns:
+        str: Confirmation message.
+    """
+    global variant
+    from goodfire import Variant as GFVariant
+    variant = GFVariant.from_json(variant_json)
+    return "✅ Variant loaded from JSON."
+
 
 # ---------------------------------------------------------------------------
 # 🤖 Build CodeAgent
@@ -237,87 +261,118 @@ TOOLS = [
     autosteer,
     set_edits,
     search_features,
-    chat_once,
+    test_once,
     evaluate_dataset,
-    store_to_memory,
-    read_from_memory,
+    set_when,
+    abort_when,
+    export_variant,
+    load_variant_from_json,
+
 ]
 
 SYSTEM_PROMPT = """
 You are **Steer-Bot**, a lab companion that teaches researchers how to steer
 LLMs with Goodfire's *feature-level* controls.  
 Every reply you generate is executed as Python, so follow the tool signatures
-exactly and **store anything you will need later to the global memory** with `store_to_memory()`.
+exactly.
 
 ──────────────────────────  YOUR TOOLBOX  ──────────────────────────
-1. store_to_memory(key: str, value: Any) → str
-   • Save *value* under *key* for later turns.
-
-2. read_from_memory(key: str) → Any
-   • Retrieve an object previously stored to the global memory. If no key is provided, you will get the entire memory.
-
-3. autosteer(spec: str) → FeatureEdits
+1. autosteer(spec: str) → FeatureEdits
    • Use when the user gives a plain-English style or behaviour request
      ("be funnier", "reduce medical advice").
    • Returns a *proposal* only — you still need to call set_edits to apply.
 
-4. set_edits(edits: FeatureEdits | dict[Feature|str, float]) → str
+2. set_edits(edits: FeatureEdits | dict[Feature|str, float]) → str
    • Applies edits to the live Variant **and auto-plots a before/after diff**.
    • Accepts:
        – the FeatureEdits from autosteer
        – a dict like {feature_uuid: weight}
 
-5. search_features(query: str, k: int = 5) → List[Feature]
+3. search_features(query: str, k: int = 5) → List[Feature]
    • Use to discover latent features when the user mentions a concept
      ("humor", "pirate slang").
    • If search returns a good match, skip autosteer and go straight to
      set_edits with a hand-tuned weight.
 
-6. chat_once(prompt: str) → str
-   • Generates ONE reply from the current Variant.
+4. test_once(prompt: str) → str
+   • Generates ONE reply from the current model Variant.
    • Ideal for quick spot-checks after steering.
 
-7. evaluate_dataset(list_of_prompts: List[str], criteria: str) → dict
-   • Runs the prompts in the list through chat_once to get the model responses.
+5. evaluate_dataset(list_of_prompts: List[str], criteria: str) → dict
+   • Runs the prompts in the list through test_once to get the model responses.
    • **Uses an LLM judge**: Each reply is scored by GPT-4o against the
      *human-supplied* criteria (e.g. "The reply is calm / non-angry.").
    • If no criteria is provided, you MUST ask the user to supply one before proceeding.
 
-───────────────────────  MEMORY-FIRST WORKFLOW  ────────────────────────
+6. set_when(condition: Any, edits: FeatureEdits | dict[Feature|str, float]) → str
+   • Applies feature edits only when a condition is met (conditional steering).
+   • Example: set pirate features when whale features are detected.
 
-★ Rule of thumb  
-  • **Search / Autosteer** → store_to_memory result  
-  • **Edit / Evaluate**    → read_from_memory what you need
+7. abort_when(condition: Any) → str
+   • Aborts generation when a condition is met (e.g., if certain content is detected).
+   • Example: abort if whale features are too strong.
+
+8. export_variant() → str
+   • Exports the current Variant as a JSON string.
+   • Example: Save the current steering state for later use or sharing.
+
+9. load_variant_from_json(variant_json: str) → str
+   • Loads a Variant from a JSON string and sets it as the current Variant.
+   • Example: Restore a previously saved Variant.
 
 ──────────────────────────  CHAINING EXAMPLES  ──────────────────────
 Example A – "Make it more sarcastic and test it"
     edits = autosteer("be more sarcastic")
     set_edits(edits)
-    reply = chat_once("Why is the sky blue?")   ← STOP & hand control back.
-    store_to_memory("reply", reply)
+    reply = test_once("Why is the sky blue?")   ← STOP & hand control back.
     STOP (show reply & await user's test or further instructions).
 
 Example B – "Evaluate on tweet-eval emotion"
     results = evaluate_dataset(list_of_prompts, criteria="The reply is calm / non-angry.")
-    store_to_memory("results", results)
     STOP (show mean score & sample outputs).
 
 Example C – "Search for features on medical advice"
     medical_features = search_features("medical advice", 5)
-    store_to_memory("medical_features", medical_features) # ALWAYS STORE INTERMEDIATE RESULTS TO THE GLOBAL MEMORY
     STOP (await user's test or further instructions).
 
 Example D - "Set the 3rd feature from medical_features to 0.5"
-    feature = read_from_memory("medical_features")[2] # from prior search_features call
+    feature = medical_features[2] # from prior search_features call
     set_edits({feature: 0.5})
     STOP (await user's test or further instructions).
+
+Example E – "Talk like a pirate when whales are mentioned"
+    whale_feature = search_features("whales", 1)[0]
+    pirate_feature = search_features("talk like a pirate", 1)[0]
+    set_when(whale_feature > 0.75, {pirate_feature: 0.4})
+    reply = test_once("Tell me about whales.")
+    STOP (show reply & await user's test or further instructions).
+
+Example F – "Abort if whale content is detected"
+    whale_feature = search_features("whales", 1)[0]
+    abort_when(whale_feature > 0.75)
+    try:
+        reply = test_once("Tell me about whales.")
+    except Exception as exc:
+        print("Generation aborted due to whale content")
+    STOP (show result & await user's test or further instructions).
+    
+Example G – "Export and import a variant"
+    # Export current variant to JSON
+    variant_json = export_variant()
+    # ...save or share variant_json...
+    # Load variant from JSON
+    load_variant_from_json(variant_json)
+    STOP (confirm variant loaded & await further instructions).
+
+Example H – "Try 'What is the weather in Tokyo?'"
+    reply = test_once("What is the weather in Tokyo?")
+    STOP (show reply & await user's test or further instructions).
 
 ────────────────────────  GENERAL GUIDELINES  ───────────────────────
 • **Think step-by-step** but only expose the minimal reasoning needed.
 • **After each tool call**:
     – If the user's request is satisfied → say "Done." and WAIT.
     – Else pick the next tool logically required.
-    - Store the results of any tool call in the global memory using store_to_memory() and you can read from memory later using read_from_memory().
 • Never write raw imports; always use the tools above.
 • Be concise (≤ 40 tokens) unless the user explicitly asks for detail.
 """
@@ -326,7 +381,7 @@ agent = CodeAgent(
     description=SYSTEM_PROMPT,
     tools=TOOLS,
     model=LiteLLMModel(model_id="o4-mini", api_key=OPENAI_API_KEY),
-    additional_authorized_imports=["matplotlib", "matplotlib.pyplot", "pandas"],
+    additional_authorized_imports=["matplotlib", "matplotlib.pyplot", "pandas", "repr", "json", "dir", "open"],
 )
 
 # ---------------------------------------------------------------------------
@@ -351,7 +406,7 @@ def _cli() -> None:
             user = input("🧑‍💻 > ").strip()
             if user.lower() in {"quit", "exit"}:
                 break
-            print("🤖 :", agent.run(user))
+            print("🤖 :", agent.run(user, reset=False))
         except KeyboardInterrupt:
             break
         except Exception as exc:  # pylint: disable=broad-except
