@@ -17,19 +17,15 @@ Install:
 
 Secrets (env vars):
     GOODFIRE_API_KEY – Goodfire key
-    OPENAI_API_KEY   – OpenAI / LiteLLM key (we default to GPT‑4o)
+    OPENAI_API_KEY   – OpenAI / LiteLLM key (we default to o4-mini)
 """
 
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, List
-import time
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-from datasets import load_dataset as hf_load_dataset
 import json
 
 from goodfire import Client, Variant, Feature, FeatureEdits
@@ -113,22 +109,6 @@ def test_once(prompt: str) -> str:
         model=variant,
     )
     return resp.choices[0].message["content"]
-
-
-def _hf_or_local(path: str) -> pd.DataFrame:
-    """Load a local CSV/JSONL/Parquet *or* a HF dataset tag into a DataFrame."""
-    if os.path.isfile(path):
-        if path.endswith(".csv"):
-            return pd.read_csv(path)
-        if path.endswith(".jsonl"):
-            return pd.read_json(path, lines=True)
-        if path.endswith(".parquet"):
-            return pd.read_parquet(path)
-        raise ValueError(f"Unsupported file type: {path}")
-
-    ds = hf_load_dataset(path)
-    split = next(iter(ds.keys())) if isinstance(ds, dict) else "train"
-    return ds[split].to_pandas()
 
 
 def _judge_reply(original: str, reply: str, criteria: str) -> float:
