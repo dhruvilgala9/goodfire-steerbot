@@ -101,9 +101,7 @@ results = evaluate_dataset(
 # Returns: {"responses": [...], "mean_score": 0.85}
 ```
 
-## 🙏 Acknowledgments
-
-Built with:
+## Built with:
 - [Goodfire](https://goodfire.ai/) - Feature-level LLM control
 - [SmolAgents](https://github.com/smol-ai/smolagents) - Agent framework
 - [LiteLLM](https://github.com/BerriAI/litellm) - LLM abstraction layer
